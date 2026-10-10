@@ -556,6 +556,24 @@
     const app = initializeApp(firebaseConfig);
     const db = getDatabase(app);
 
+    // Cashfree Production Configuration
+    const CASHFREE_CONFIG = {
+      appId: "1126255cca4e790823a828c8f0c5526211",
+      secretKey: "cfsk_ma_prod_6fb9c1a7a22a83e033ba5da4f29ec110_b8a0def7",
+      mode: "production",
+      apiVersion: "2023-08-01"
+    };
+
+    // Initialize Cashfree Production SDK instance
+    let cashfree;
+    try {
+      if (window.Cashfree) {
+        cashfree = Cashfree({ mode: "production" });
+      }
+    } catch (e) {
+      console.error("Cashfree SDK Initialization failed:", e);
+    }
+
     let allServices = {};
     let allOrders = {};
     let activePlatform = "ALL";
@@ -960,37 +978,107 @@
       document.getElementById("checkout-modal").classList.add("hidden");
     };
 
-    window.initiateCashfreePayment = function(e) {
+    window.initiateCashfreePayment = async function(e) {
       e.preventDefault();
-      const svcId = document.getElementById("modal-service-id").value;
-      const targetLink = document.getElementById("order-target-link").value;
-      const phone = document.getElementById("order-phone").value;
-      const svc = allServices[svcId];
+      const btnSubmit = document.getElementById("btn-submit-order");
+      const originalText = btnSubmit.innerHTML;
 
-      const orderKey = "ORD-" + Math.floor(100000 + Math.random() * 900000);
-      const newOrder = {
-        orderId: orderKey,
-        userEmail: currentUser.email,
-        userName: currentUser.name,
-        serviceTitle: svc.title,
-        platform: svc.platform,
-        amount: svc.price,
-        targetLink: targetLink,
-        phone: phone,
-        status: "PENDING",
-        createdAt: Date.now()
-      };
+      try {
+        btnSubmit.disabled = true;
+        btnSubmit.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i> Generating Cashfree Session...`;
 
-      // Push to Firebase Realtime DB
-      const newRef = push(ref(db, "orders"));
-      set(newRef, newOrder).then(() => {
-        closeCheckoutModal();
-        switchTab("orders");
+        const svcId = document.getElementById("modal-service-id").value;
+        const targetLink = document.getElementById("order-target-link").value;
+        const phone = document.getElementById("order-phone").value;
+        const svc = allServices[svcId];
 
-        // Simulate Cashfree Drop Checkout
-        alert(`Cashfree Gateway Initialized for Order ${orderKey} (₹${svc.price}). Use the Webhook Simulator in Account tab to mark as PAID.`);
-      });
+        const orderKey = "ORD_" + Date.now() + "_" + Math.floor(100 + Math.random() * 900);
+        const amount = Number(svc.price).toFixed(2);
+
+        // Request body for Cashfree Production API v2023-08-01
+        const orderPayload = {
+          order_id: orderKey,
+          order_amount: parseFloat(amount),
+          order_currency: "INR",
+          customer_details: {
+            customer_id: currentUser.email.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 40),
+            customer_name: currentUser.name || "PulseBoost Customer",
+            customer_email: currentUser.email,
+            customer_phone: phone || "9876543210"
+          },
+          order_meta: {
+            return_url: window.location.href + "?cf_order_id={order_id}"
+          }
+        };
+
+        // Create Order on Cashfree API
+        const response = await fetch("https://api.cashfree.com/pg/orders", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-version": CASHFREE_CONFIG.apiVersion,
+            "x-client-id": CASHFREE_CONFIG.appId,
+            "x-client-secret": CASHFREE_CONFIG.secretKey
+          },
+          body: JSON.stringify(orderPayload)
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.payment_session_id) {
+          // Save order details to Firebase Realtime Database
+          const newOrder = {
+            orderId: orderKey,
+            cfOrderId: data.cf_order_id || orderKey,
+            paymentSessionId: data.payment_session_id,
+            userEmail: currentUser.email,
+            userName: currentUser.name,
+            serviceTitle: svc.title,
+            platform: svc.platform,
+            amount: svc.price,
+            targetLink: targetLink,
+            phone: phone,
+            status: "PENDING",
+            createdAt: Date.now()
+          };
+
+          const newRef = push(ref(db, "orders"));
+          await set(newRef, newOrder);
+
+          closeCheckoutModal();
+          switchTab("orders");
+
+          // Open Cashfree Seamless Drop Checkout
+          if (cashfree) {
+            cashfree.checkout({
+              paymentSessionId: data.payment_session_id,
+              redirectTarget: "_self"
+            });
+          } else {
+            alert("Cashfree SDK failed to initialize. Order ID: " + orderKey);
+          }
+        } else {
+          console.error("Cashfree API Error Response:", data);
+          alert("Cashfree Order Generation Failed: " + (data.message || JSON.stringify(data)));
+        }
+      } catch (err) {
+        console.error("Payment initiation error:", err);
+        alert("Payment Error: " + err.message);
+      } finally {
+        btnSubmit.disabled = false;
+        btnSubmit.innerHTML = originalText;
+      }
     };
+
+    // Check for payment return query string parameters on load
+    window.addEventListener("DOMContentLoaded", () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const returnedOrderId = urlParams.get("cf_order_id");
+      if (returnedOrderId) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+        alert(`Payment processed for Cashfree Order ID: ${returnedOrderId}. Verifying order status...`);
+      }
+    });
 
     // ORDERS LISTING & ACCOUNT STATS
     window.renderUserOrders = function() {
